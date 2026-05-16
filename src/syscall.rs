@@ -5,9 +5,9 @@
 //! tests, simulators, and future platform shims can share the same safe API.
 
 use crate::abi::{
-    CapabilityHandle, DeviceHandle, Handle, InferenceBudget, MemoryMapFlags, ModelHandle,
-    SharedMemoryHandle, SysInfo, SyscallFrame, SyscallNumber, SyscallReturn, TaskHandle, TaskState,
-    TraceContext, UserBuffer, USER_BUFFER_READ, USER_BUFFER_WRITE,
+    CapabilityHandle, CapabilityRights, DeviceHandle, Handle, InferenceBudget, MemoryMapFlags,
+    ModelHandle, SharedMemoryHandle, SysInfo, SyscallFrame, SyscallNumber, SyscallReturn,
+    TaskHandle, TaskSpawnOptions, TaskState, TraceContext, UserBuffer, USER_BUFFER_READ,
 };
 use crate::error::{AlaniError, AlaniResult};
 
@@ -55,9 +55,7 @@ impl<T: SyscallTransport> AlaniClient<T> {
 
     /// Replaces the current trace context after validation.
     pub fn set_trace(&mut self, trace: TraceContext) -> AlaniResult<()> {
-        if trace.reserved != 0 {
-            return Err(AlaniError::InvalidTrace);
-        }
+        trace.validate()?;
         self.trace = trace;
         Ok(())
     }
@@ -75,10 +73,7 @@ impl<T: SyscallTransport> AlaniClient<T> {
     /// Calls `sys_info`.
     pub fn sys_info(&mut self, out: &mut [u8]) -> AlaniResult<SysInfo> {
         let out = UserBuffer::write_only(out)?;
-        let ret = self.invoke(
-            SyscallNumber::SysInfo,
-            [out.ptr, out.len, out.flags as u64, 0, 0, 0],
-        )?;
+        let ret = self.invoke(SyscallNumber::SysInfo, [out.ptr, out.len, 0, 0, 0, 0])?;
         Ok(SysInfo::from_return(ret))
     }
 
@@ -109,10 +104,21 @@ impl<T: SyscallTransport> AlaniClient<T> {
 
     /// Calls `sys_task_spawn` with a manifest buffer and priority.
     pub fn sys_task_spawn(&mut self, manifest: &[u8], priority: u8) -> AlaniResult<TaskHandle> {
+        self.sys_task_spawn_with_options(manifest, TaskSpawnOptions::priority(priority))
+    }
+
+    /// Calls `sys_task_spawn` with explicit spawn options.
+    pub fn sys_task_spawn_with_options(
+        &mut self,
+        manifest: &[u8],
+        options: TaskSpawnOptions,
+    ) -> AlaniResult<TaskHandle> {
+        options.validate()?;
         let manifest = UserBuffer::read_only(manifest)?;
+        let options_ptr = &options as *const TaskSpawnOptions as usize as u64;
         let ret = self.invoke(
             SyscallNumber::SysTaskSpawn,
-            [manifest.ptr, manifest.len, 0, u64::from(priority), 0, 0],
+            [manifest.ptr, manifest.len, options_ptr, 0, 0, 0],
         )?;
         Ok(Handle(ret.value))
     }
@@ -186,10 +192,7 @@ impl<T: SyscallTransport> AlaniClient<T> {
     /// Calls `sys_device_list`.
     pub fn sys_device_list(&mut self, out: &mut [u8]) -> AlaniResult<usize> {
         let out = UserBuffer::write_only(out)?;
-        let ret = self.invoke(
-            SyscallNumber::SysDeviceList,
-            [out.ptr, out.len, out.flags as u64, 0, 0, 0],
-        )?;
+        let ret = self.invoke(SyscallNumber::SysDeviceList, [out.ptr, out.len, 0, 0, 0, 0])?;
         usize::try_from(ret.value).map_err(|_| AlaniError::InvalidValue)
     }
 
@@ -308,9 +311,12 @@ impl<T: SyscallTransport> AlaniClient<T> {
         parent: CapabilityHandle,
         requested_rights: u64,
     ) -> AlaniResult<CapabilityHandle> {
-        if !parent.is_valid() || requested_rights == 0 {
+        parent.validate()?;
+        let requested = CapabilityRights::from_bits(requested_rights)?;
+        if requested.is_empty() {
             return Err(AlaniError::InvalidHandle);
         }
+        parent.require(requested)?;
         let ret = self.invoke(
             SyscallNumber::SysCapDerive,
             [
@@ -322,19 +328,22 @@ impl<T: SyscallTransport> AlaniClient<T> {
                 0,
             ],
         )?;
+        let generation = u32::try_from(ret.detail).map_err(|_| AlaniError::InvalidValue)?;
+        if ret.value == 0 || generation == 0 {
+            return Err(AlaniError::InvalidHandle);
+        }
         Ok(CapabilityHandle {
             id: ret.value,
             rights: requested_rights,
-            owner_task: 0,
-            generation: ret.detail as u32,
+            owner_task: parent.owner_task,
+            generation,
+            reserved: 0,
         })
     }
 
     /// Calls `sys_cap_revoke`.
     pub fn sys_cap_revoke(&mut self, handle: CapabilityHandle) -> AlaniResult<()> {
-        if !handle.is_valid() {
-            return Err(AlaniError::InvalidHandle);
-        }
+        handle.validate()?;
         self.invoke(
             SyscallNumber::SysCapRevoke,
             [handle.id, handle.generation as u64, 0, 0, 0, 0],
@@ -384,14 +393,7 @@ impl<T: SyscallTransport> AlaniClient<T> {
         let output = UserBuffer::write_only(output)?;
         let ret = self.invoke(
             SyscallNumber::SysAuditQuery,
-            [
-                start,
-                end,
-                output.ptr,
-                output.len,
-                USER_BUFFER_WRITE as u64,
-                0,
-            ],
+            [start, end, output.ptr, output.len, 0, 0],
         )?;
         usize::try_from(ret.detail.max(ret.value)).map_err(|_| AlaniError::InvalidValue)
     }
@@ -407,14 +409,7 @@ impl<T: SyscallTransport> AlaniClient<T> {
         let output = UserBuffer::write_only(output)?;
         let ret = self.invoke(
             SyscallNumber::SysAuditVerify,
-            [
-                start,
-                end,
-                output.ptr,
-                output.len,
-                USER_BUFFER_WRITE as u64,
-                0,
-            ],
+            [start, end, output.ptr, output.len, 0, 0],
         )?;
         usize::try_from(ret.detail.max(ret.value)).map_err(|_| AlaniError::InvalidValue)
     }
@@ -436,11 +431,7 @@ impl<T: SyscallTransport> AlaniClient<T> {
 }
 
 fn validate_handle(handle: Handle) -> AlaniResult<()> {
-    if handle.is_valid() {
-        Ok(())
-    } else {
-        Err(AlaniError::InvalidHandle)
-    }
+    handle.validate()
 }
 
 fn validate_range(start: u64, len: u64) -> AlaniResult<()> {

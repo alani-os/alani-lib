@@ -25,6 +25,9 @@ pub enum Severity {
     Critical,
 }
 
+/// Log level vocabulary used by trace and diagnostic views.
+pub type LogLevel = Severity;
+
 /// Data classification for event fields.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +68,9 @@ impl RedactionPolicy {
 /// Stable redacted value used by event helpers.
 pub const REDACTED: &str = "[redacted]";
 
+/// Stable reason label used when a field is redacted by policy.
+pub const REDACTION_REASON_SENSITIVE: &str = "sensitive";
+
 /// Component label for structured events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Component<'a> {
@@ -88,6 +94,10 @@ pub struct EventEnvelope<'a> {
     pub event_id: u64,
     /// Trace context.
     pub trace: TraceContext,
+    /// Wall-clock or host timestamp in nanoseconds, or zero when unset.
+    pub timestamp_ns: u64,
+    /// Monotonic event counter, or zero when unset.
+    pub monotonic_counter: u64,
     /// Component name.
     pub component: Component<'a>,
     /// Operation name.
@@ -106,6 +116,8 @@ pub struct EventEnvelope<'a> {
     pub data_class: DataClass,
     /// Human-readable payload after redaction.
     pub payload: &'a str,
+    /// Redaction reason, empty when payload was not redacted.
+    pub redaction_reason: &'a str,
 }
 
 impl<'a> EventEnvelope<'a> {
@@ -123,6 +135,8 @@ impl<'a> EventEnvelope<'a> {
             schema_version: Self::SCHEMA_VERSION,
             event_id,
             trace,
+            timestamp_ns: 0,
+            monotonic_counter: 0,
             component,
             operation,
             principal: "",
@@ -132,7 +146,20 @@ impl<'a> EventEnvelope<'a> {
             severity: Severity::Info,
             data_class: DataClass::Operational,
             payload: "",
+            redaction_reason: "",
         }
+    }
+
+    /// Sets timestamp metadata.
+    pub const fn timestamp_ns(mut self, timestamp_ns: u64) -> Self {
+        self.timestamp_ns = timestamp_ns;
+        self
+    }
+
+    /// Sets monotonic counter metadata.
+    pub const fn monotonic_counter(mut self, monotonic_counter: u64) -> Self {
+        self.monotonic_counter = monotonic_counter;
+        self
     }
 
     /// Sets principal metadata.
@@ -173,10 +200,12 @@ impl<'a> EventEnvelope<'a> {
         policy: RedactionPolicy,
     ) -> Self {
         self.data_class = data_class;
-        self.payload = if policy.redacts(data_class) {
-            REDACTED
+        let redacted = policy.redacts(data_class);
+        self.payload = if redacted { REDACTED } else { payload };
+        self.redaction_reason = if redacted {
+            REDACTION_REASON_SENSITIVE
         } else {
-            payload
+            ""
         };
         self
     }
@@ -187,6 +216,62 @@ impl<'a> EventEnvelope<'a> {
             || self.component.name.is_empty()
             || self.operation.is_empty()
         {
+            return Err(AlaniError::InvalidValue);
+        }
+        self.trace.validate()
+    }
+}
+
+/// Metric unit with bounded cardinality for host tests and adapters.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetricUnit {
+    /// Plain count.
+    Count,
+    /// Duration in nanoseconds.
+    Nanoseconds,
+    /// Size in bytes.
+    Bytes,
+    /// Ratio represented as a fixed-point integer chosen by the producer.
+    Ratio,
+}
+
+/// Numeric metric sample with trace and component metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetricSample<'a> {
+    /// Metric name.
+    pub name: &'a str,
+    /// Metric value.
+    pub value: u64,
+    /// Metric unit.
+    pub unit: MetricUnit,
+    /// Component that emitted the metric.
+    pub component: Component<'a>,
+    /// Trace context associated with the sample.
+    pub trace: TraceContext,
+}
+
+impl<'a> MetricSample<'a> {
+    /// Creates a metric sample.
+    pub const fn new(
+        name: &'a str,
+        value: u64,
+        unit: MetricUnit,
+        component: Component<'a>,
+        trace: TraceContext,
+    ) -> Self {
+        Self {
+            name,
+            value,
+            unit,
+            component,
+            trace,
+        }
+    }
+
+    /// Validates metric metadata and trace context.
+    pub const fn validate(self) -> AlaniResult<()> {
+        if self.name.is_empty() || self.component.name.is_empty() {
             return Err(AlaniError::InvalidValue);
         }
         self.trace.validate()

@@ -4,7 +4,7 @@ Shared safe wrappers, result types, error vocabulary, no_std utilities, and ergo
 
 | Field | Value |
 |---|---|
-| Status | Experimental MVK skeleton |
+| Status | Experimental MVK implementation |
 | Tier | MVK required |
 | Owner | Core library team |
 | Aliases | None |
@@ -17,18 +17,24 @@ cargo fmt -- --check
 cargo test --all-features
 cargo test --no-default-features
 cargo check --no-default-features
-cargo clippy --all-features -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+## Feature Flags
+
+- `std` is enabled by default for host tooling and test ergonomics.
+- `--no-default-features` exercises the no-std-compatible API surface expected by Doc 10.
 
 ## Scope
 
 This crate is intentionally dependency-free while `alani-abi` stabilizes. It implements no-std-friendly host-mode contracts for:
 
-- ABI-safe `repr(C)` status, version, buffer, trace, budget, syscall frame, and syscall return structures;
-- stable syscall numbers and group/name helpers for the public MVK syscall surface;
-- safe user-buffer constructors from slices with reserved-bit, null-pointer, and length validation;
+- ABI-safe `repr(C)` status, version, feature, buffer, trace, budget, handle, syscall frame, syscall return, and `sys_info` structures;
+- canonical syscall numbers, descriptor metadata, context flags, audit metadata, and group/name helpers for the public MVK syscall surface;
+- safe user-buffer constructors from slices with reserved-bit, direction, null-pointer, overflow, alignment, and length validation;
+- capability rights and handle validation helpers that fail closed before authority-sensitive wrappers invoke a transport;
 - stable error mapping between rich Rust errors and ABI status codes;
-- trace context helpers, deterministic host-test trace IDs, structured event envelopes, and redaction policies;
+- trace context helpers, deterministic host-test trace IDs, structured event envelopes, metric samples, and redaction policies;
 - safe syscall wrapper methods over an injectable `SyscallTransport` for host tests, simulators, and future architecture shims.
 
 ## Layout
@@ -49,3 +55,8 @@ tests/
 The first API surface is mapped to `alani-spec/docs/repositories/alani-lib.md`, Doc 08, Doc 09, Doc 10, Doc 27, Doc 28, Doc 42, and Doc 43.
 
 Path dependencies remain out of `Cargo.toml` until `alani-abi` publishes stable public APIs, as required by the repository metadata contract.
+
+## Troubleshooting
+
+- If Cargo reports a target lock error, rerun the commands sequentially from this crate directory.
+- If a wrapper frame fails a test after changing syscall metadata, compare `abi::SYSCALL_TABLE` with Doc 09 and the canonical `alani-abi` public table before updating callers.
